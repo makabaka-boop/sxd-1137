@@ -30,3 +30,13 @@ class IsReviewer(BasePermission):
 class IsAdminUser(BasePermission):
     def has_permission(self, request, view):
         return request.user and request.user.is_authenticated and request.user.is_staff
+
+
+class IsRepairOrderCreator(BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        return request.user.is_staff or request.user.groups.filter(name='reviewer').exists()
+
+    def has_object_permission(self, request, view, obj):
+        return request.user.is_staff or request.user.groups.filter(name='reviewer').exists()

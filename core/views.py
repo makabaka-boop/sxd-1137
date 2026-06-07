@@ -21,7 +21,7 @@ from .serializers import (
     ProblemRecordSerializer, ReviewSerializer,
     EquipmentRepairOrderSerializer, RepairStatusUpdateSerializer, RepairOrderCreateSerializer
 )
-from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer
+from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer, IsRepairOrderCreator
 
 
 class EquipmentTypeViewSet(viewsets.ModelViewSet):
@@ -160,9 +160,13 @@ class ProblemRecordViewSet(viewsets.ReadOnlyModelViewSet):
 class EquipmentRepairOrderViewSet(viewsets.ModelViewSet):
     queryset = EquipmentRepairOrder.objects.all()
     serializer_class = EquipmentRepairOrderSerializer
-    permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter]
     search_fields = ['order_no', 'equipment__serial_number', 'equipment__name']
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsRepairOrderCreator()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -228,7 +232,36 @@ class EquipmentRepairOrderViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED
         )
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        old_status = instance.status
+        self.perform_update(serializer)
+        
+        if getattr(instance, '_prefetched_objects_cache', None):
+            instance._prefetched_objects_cache = {}
+        
+        equipment = instance.equipment
+        new_status = instance.status
+        
+        if new_status in ['pending', 'repairing']:
+            equipment.is_available = False
+        elif new_status == 'completed':
+            if instance.restore_available:
+                equipment.is_available = True
+            if instance.updated_damage_level is not None:
+                equipment.damage_level = instance.updated_damage_level
+        elif new_status == 'cancelled':
+            equipment.is_available = True
+        
+        equipment.save()
+        
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsRepairOrderCreator])
     def update_status(self, request, pk=None):
         repair_order = self.get_object()
         serializer = RepairStatusUpdateSerializer(data=request.data)
@@ -239,25 +272,30 @@ class EquipmentRepairOrderViewSet(viewsets.ModelViewSet):
         updated_damage_level = serializer.validated_data.get('updated_damage_level')
         restore_available = serializer.validated_data.get('restore_available', True)
         
+        old_status = repair_order.status
         repair_order.status = new_status
         repair_order.result_note = result_note
+        
+        equipment = repair_order.equipment
         
         if new_status == 'completed':
             repair_order.actual_complete_time = timezone.now()
             if updated_damage_level is not None:
                 repair_order.updated_damage_level = updated_damage_level
-            
-            equipment = repair_order.equipment
-            if updated_damage_level is not None:
                 equipment.damage_level = updated_damage_level
+            repair_order.restore_available = restore_available
             if restore_available:
                 equipment.is_available = True
-            equipment.save()
+            else:
+                equipment.is_available = False
         elif new_status == 'cancelled':
-            equipment = repair_order.equipment
             equipment.is_available = True
-            equipment.save()
+        elif new_status == 'repairing':
+            equipment.is_available = False
+        elif new_status == 'pending':
+            equipment.is_available = False
         
+        equipment.save()
         repair_order.save()
         
         return Response(EquipmentRepairOrderSerializer(repair_order, context=self.get_serializer_context()).data)
@@ -624,18 +662,19 @@ class StatisticsView(APIView):
         })
 
     def get_repair_stats(self):
-        total_repair_orders = EquipmentRepairOrder.objects.count()
-        repairing_count = EquipmentRepairOrder.objects.filter(
+        valid_orders = EquipmentRepairOrder.objects.exclude(status='cancelled')
+        total_repair_orders = valid_orders.count()
+        repairing_count = valid_orders.filter(
             status__in=['pending', 'repairing']
         ).count()
-        completed_count = EquipmentRepairOrder.objects.filter(
+        completed_count = valid_orders.filter(
             status='completed'
         ).count()
         cancelled_count = EquipmentRepairOrder.objects.filter(
             status='cancelled'
         ).count()
 
-        repair_by_type = EquipmentRepairOrder.objects.values(
+        repair_by_type = valid_orders.values(
             'equipment__equipment_type__name',
             'equipment__equipment_type__code'
         ).annotate(
@@ -644,7 +683,7 @@ class StatisticsView(APIView):
 
         repair_stats = []
         for item in repair_by_type:
-            completed_by_type = EquipmentRepairOrder.objects.filter(
+            completed_by_type = valid_orders.filter(
                 equipment__equipment_type__code=item['equipment__equipment_type__code'],
                 status='completed'
             ).count()
@@ -664,7 +703,7 @@ class StatisticsView(APIView):
         })
 
     def get_frequent_damage_ranking(self):
-        ranking = EquipmentRepairOrder.objects.values(
+        ranking = EquipmentRepairOrder.objects.exclude(status='cancelled').values(
             'equipment__serial_number',
             'equipment__name',
             'equipment__equipment_type__name'
