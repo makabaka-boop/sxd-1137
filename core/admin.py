@@ -44,10 +44,48 @@ class PatrolBatchAdmin(admin.ModelAdmin):
 
 @admin.register(PatrolRecord)
 class PatrolRecordAdmin(admin.ModelAdmin):
-    list_display = ['batch', 'line_number', 'equipment_serial', 'equipment_name', 'borrower', 'damage_level', 'status']
+    list_display = [
+        'batch', 'line_number', 'equipment_serial', 'equipment_name', 
+        'borrower', 'damage_level', 'status', 'is_overdue_display', 
+        'overdue_days_display', 'overdue_handle_status'
+    ]
     search_fields = ['equipment_serial', 'equipment_name', 'borrower', 'batch__batch_no']
-    list_filter = ['status', 'damage_level', 'equipment_type', 'storage_location']
+    list_filter = [
+        'status', 'damage_level', 'equipment_type', 'storage_location',
+        'overdue_handle_status'
+    ]
     readonly_fields = ['batch', 'line_number', 'created_at']
+    fieldsets = (
+        (None, {
+            'fields': ('batch', 'line_number', 'equipment', 'equipment_serial', 'equipment_name')
+        }),
+        ('借用信息', {
+            'fields': ('equipment_type', 'storage_location', 'location_code', 'borrower', 
+                       'borrow_date', 'due_date', 'return_date', 'is_returned')
+        }),
+        ('损坏信息', {
+            'fields': ('damage_level', 'damage_description')
+        }),
+        ('复核信息', {
+            'fields': ('status', 'reviewer', 'review_time', 'review_remark')
+        }),
+        ('逾期处理', {
+            'fields': ('overdue_handle_status', 'overdue_handled_by', 'overdue_handled_at', 'overdue_handle_remark')
+        }),
+        ('时间信息', {
+            'fields': ('created_at',),
+            'classes': ('collapse',)
+        })
+    )
+
+    def is_overdue_display(self, obj):
+        return obj.is_overdue
+    is_overdue_display.boolean = True
+    is_overdue_display.short_description = '是否逾期'
+
+    def overdue_days_display(self, obj):
+        return obj.overdue_days
+    overdue_days_display.short_description = '逾期天数'
 
 
 @admin.register(ProblemRecord)

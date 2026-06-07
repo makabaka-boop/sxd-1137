@@ -19,7 +19,8 @@ from .serializers import (
     EquipmentTypeSerializer, StorageLocationSerializer, BorrowRuleSerializer,
     EquipmentSerializer, PatrolBatchSerializer, PatrolRecordSerializer,
     ProblemRecordSerializer, ReviewSerializer,
-    EquipmentRepairOrderSerializer, RepairStatusUpdateSerializer, RepairOrderCreateSerializer
+    EquipmentRepairOrderSerializer, RepairStatusUpdateSerializer, RepairOrderCreateSerializer,
+    OverdueHandleSerializer
 )
 from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer, IsRepairOrderCreator
 
@@ -104,6 +105,10 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
         end_date = self.request.query_params.get('end_date')
         damage_level = self.request.query_params.get('damage_level')
         batch_id = self.request.query_params.get('batch_id')
+        is_overdue = self.request.query_params.get('is_overdue')
+        min_overdue_days = self.request.query_params.get('min_overdue_days')
+        max_overdue_days = self.request.query_params.get('max_overdue_days')
+        overdue_handle_status = self.request.query_params.get('overdue_handle_status')
 
         if equipment_type:
             queryset = queryset.filter(equipment_type_id=equipment_type)
@@ -121,8 +126,59 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(damage_level=damage_level)
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
+        if overdue_handle_status:
+            queryset = queryset.filter(overdue_handle_status=overdue_handle_status)
+
+        today = timezone.now().date()
+        if is_overdue is not None:
+            is_overdue_bool = is_overdue.lower() == 'true'
+            if is_overdue_bool:
+                queryset = queryset.filter(
+                    status='approved',
+                    is_returned=False,
+                    due_date__lt=today
+                )
+            else:
+                queryset = queryset.exclude(
+                    status='approved',
+                    is_returned=False,
+                    due_date__lt=today
+                )
+
+        if min_overdue_days or max_overdue_days:
+            queryset = queryset.filter(
+                status='approved',
+                is_returned=False,
+                due_date__lt=today
+            )
+            if min_overdue_days:
+                min_date = today - timedelta(days=int(min_overdue_days))
+                queryset = queryset.filter(due_date__lte=min_date)
+            if max_overdue_days:
+                max_date = today - timedelta(days=int(max_overdue_days) + 1)
+                queryset = queryset.filter(due_date__gt=max_date)
 
         return queryset
+
+    @action(detail=False, methods=['post'], permission_classes=[IsReviewer], url_path='handle-overdue')
+    def handle_overdue(self, request):
+        serializer = OverdueHandleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        record_ids = serializer.validated_data['record_ids']
+        handle_remark = serializer.validated_data.get('handle_remark', '')
+
+        updated_count = PatrolRecord.objects.filter(id__in=record_ids).update(
+            overdue_handle_status='handled',
+            overdue_handled_by=request.user,
+            overdue_handled_at=timezone.now(),
+            overdue_handle_remark=handle_remark
+        )
+
+        return Response({
+            'message': f'成功处理 {updated_count} 条逾期记录',
+            'updated_count': updated_count
+        })
 
 
 class ProblemRecordViewSet(viewsets.ReadOnlyModelViewSet):
@@ -550,6 +606,10 @@ class StatisticsView(APIView):
             return self.get_repair_stats()
         elif stats_type == 'frequent_damage_ranking':
             return self.get_frequent_damage_ranking()
+        elif stats_type == 'overdue_ranking':
+            return self.get_overdue_ranking()
+        elif stats_type == 'overdue_detail':
+            return self.get_overdue_detail()
         else:
             return self.get_overview()
 
@@ -633,11 +693,13 @@ class StatisticsView(APIView):
         total_records = PatrolRecord.objects.count()
         pending_count = PatrolRecord.objects.filter(status='pending').count()
         approved_count = PatrolRecord.objects.filter(status='approved').count()
-        delayed_count = PatrolRecord.objects.filter(
+        overdue_queryset = PatrolRecord.objects.filter(
+            status='approved',
             is_returned=False,
-            due_date__lt=today,
-            status='approved'
-        ).count()
+            due_date__lt=today
+        )
+        current_overdue_count = overdue_queryset.filter(overdue_handle_status='pending').count()
+        handled_overdue_count = overdue_queryset.filter(overdue_handle_status='handled').count()
         damaged_count = PatrolRecord.objects.filter(
             damage_level__gt=0,
             status='approved'
@@ -655,7 +717,9 @@ class StatisticsView(APIView):
             'total_records': total_records,
             'pending_count': pending_count,
             'approved_count': approved_count,
-            'delayed_count': delayed_count,
+            'current_overdue_count': current_overdue_count,
+            'handled_overdue_count': handled_overdue_count,
+            'total_overdue_count': current_overdue_count + handled_overdue_count,
             'damaged_count': damaged_count,
             'repairing_count': repairing_count,
             'completed_repair_count': completed_repair_count
@@ -726,4 +790,68 @@ class StatisticsView(APIView):
 
         return Response({
             'ranking': result
+        })
+
+    def get_overdue_ranking(self):
+        today = timezone.now().date()
+        overdue_records = PatrolRecord.objects.filter(
+            status='approved',
+            is_returned=False,
+            due_date__lt=today
+        )
+
+        overdue_by_borrower = overdue_records.values('borrower').annotate(
+            total_count=Count('id'),
+            pending_count=Count('id', filter=Q(overdue_handle_status='pending')),
+            handled_count=Count('id', filter=Q(overdue_handle_status='handled'))
+        ).order_by('-total_count')[:20]
+
+        ranking = []
+        for item in overdue_by_borrower:
+            borrower_records = overdue_records.filter(borrower=item['borrower'])
+            total_overdue_days = sum(
+                (today - record.due_date).days
+                for record in borrower_records
+            )
+            pending_records = borrower_records.filter(overdue_handle_status='pending')
+            max_overdue_days = max(
+                ((today - record.due_date).days for record in borrower_records),
+                default=0
+            )
+            ranking.append({
+                'borrower': item['borrower'],
+                'total_count': item['total_count'],
+                'pending_count': item['pending_count'],
+                'handled_count': item['handled_count'],
+                'total_overdue_days': total_overdue_days,
+                'avg_overdue_days': round(total_overdue_days / item['total_count'], 1) if item['total_count'] > 0 else 0,
+                'max_overdue_days': max_overdue_days
+            })
+
+        ranking.sort(key=lambda x: x['total_overdue_days'], reverse=True)
+
+        return Response({
+            'total_overdue': overdue_records.count(),
+            'pending_overdue': overdue_records.filter(overdue_handle_status='pending').count(),
+            'handled_overdue': overdue_records.filter(overdue_handle_status='handled').count(),
+            'ranking': ranking
+        })
+
+    def get_overdue_detail(self):
+        borrower = self.request.query_params.get('borrower')
+        if not borrower:
+            return Response({'error': '请指定借用人'}, status=status.HTTP_400_BAD_REQUEST)
+
+        today = timezone.now().date()
+        records = PatrolRecord.objects.filter(
+            status='approved',
+            is_returned=False,
+            due_date__lt=today,
+            borrower=borrower
+        ).order_by('-due_date')
+
+        return Response({
+            'borrower': borrower,
+            'total_count': records.count(),
+            'records': PatrolRecordSerializer(records, many=True).data
         })

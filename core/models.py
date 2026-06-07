@@ -112,6 +112,12 @@ class PatrolBatch(models.Model):
         return self.batch_no
 
 
+OVERDUE_HANDLE_STATUS_CHOICES = [
+    ('pending', '待处理'),
+    ('handled', '已处理'),
+]
+
+
 class PatrolRecord(models.Model):
     batch = models.ForeignKey(PatrolBatch, on_delete=models.CASCADE, related_name='records', verbose_name='所属批次')
     line_number = models.IntegerField(verbose_name='行号')
@@ -132,6 +138,10 @@ class PatrolRecord(models.Model):
     reviewer = models.ForeignKey(User, on_delete=models.PROTECT, related_name='reviewed_records', null=True, blank=True, verbose_name='复核人')
     review_time = models.DateTimeField(null=True, blank=True, verbose_name='复核时间')
     review_remark = models.TextField(blank=True, null=True, verbose_name='复核备注')
+    overdue_handle_status = models.CharField(max_length=20, choices=OVERDUE_HANDLE_STATUS_CHOICES, default='pending', verbose_name='逾期处理状态')
+    overdue_handled_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='handled_overdue_records', null=True, blank=True, verbose_name='逾期处理人')
+    overdue_handled_at = models.DateTimeField(null=True, blank=True, verbose_name='逾期处理时间')
+    overdue_handle_remark = models.TextField(blank=True, null=True, verbose_name='逾期处理备注')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
 
     class Meta:
@@ -142,6 +152,22 @@ class PatrolRecord(models.Model):
 
     def __str__(self):
         return f'{self.batch.batch_no} - 行{self.line_number}'
+
+    @property
+    def is_overdue(self):
+        if self.status != 'approved' or self.is_returned or not self.due_date:
+            return False
+        from django.utils import timezone
+        today = timezone.now().date()
+        return today > self.due_date
+
+    @property
+    def overdue_days(self):
+        if not self.is_overdue:
+            return 0
+        from django.utils import timezone
+        today = timezone.now().date()
+        return (today - self.due_date).days
 
 
 REPAIR_STATUS_CHOICES = [

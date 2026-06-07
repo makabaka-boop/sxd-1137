@@ -3,7 +3,8 @@ from django.contrib.auth.models import User
 from .models import (
     EquipmentType, StorageLocation, BorrowRule, Equipment,
     PatrolBatch, PatrolRecord, ProblemRecord, EquipmentRepairOrder,
-    DAMAGE_LEVEL_CHOICES, STATUS_CHOICES, REPAIR_STATUS_CHOICES, REPAIR_REASON_CHOICES
+    DAMAGE_LEVEL_CHOICES, STATUS_CHOICES, REPAIR_STATUS_CHOICES, REPAIR_REASON_CHOICES,
+    OVERDUE_HANDLE_STATUS_CHOICES
 )
 
 
@@ -64,6 +65,10 @@ class PatrolRecordSerializer(serializers.ModelSerializer):
     damage_level_display = serializers.CharField(source='get_damage_level_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     reviewer_name = serializers.CharField(source='reviewer.username', read_only=True, allow_null=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+    overdue_days = serializers.IntegerField(read_only=True)
+    overdue_handle_status_display = serializers.CharField(source='get_overdue_handle_status_display', read_only=True)
+    overdue_handled_by_name = serializers.CharField(source='overdue_handled_by.username', read_only=True, allow_null=True)
 
     class Meta:
         model = PatrolRecord
@@ -194,4 +199,30 @@ class RepairOrderCreateSerializer(serializers.Serializer):
             User.objects.get(id=value)
         except User.DoesNotExist:
             raise serializers.ValidationError('维修负责人不存在')
+        return value
+
+
+class OverdueHandleSerializer(serializers.Serializer):
+    record_ids = serializers.ListField(child=serializers.IntegerField())
+    handle_remark = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_record_ids(self, value):
+        if not value:
+            raise serializers.ValidationError('请选择要处理的记录')
+        
+        from django.utils import timezone
+        today = timezone.now().date()
+        
+        records = PatrolRecord.objects.filter(id__in=value)
+        if records.count() != len(value):
+            raise serializers.ValidationError('部分记录不存在')
+        
+        for record in records:
+            if record.status != 'approved':
+                raise serializers.ValidationError(f'记录 {record.id} 未通过复核，无法处理逾期')
+            if record.is_returned:
+                raise serializers.ValidationError(f'记录 {record.id} 已归还，不属于逾期记录')
+            if record.due_date >= today:
+                raise serializers.ValidationError(f'记录 {record.id} 未到逾期时间')
+        
         return value
