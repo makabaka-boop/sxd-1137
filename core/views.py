@@ -9,6 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
 from django.contrib.auth.models import User
 from .models import (
     EquipmentType, StorageLocation, BorrowRule, Equipment,
@@ -126,18 +127,30 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(damage_level=damage_level)
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
-        if overdue_handle_status:
-            queryset = queryset.filter(overdue_handle_status=overdue_handle_status)
-
         today = timezone.now().date()
+
+        def overdue_queryset_filter(queryset):
+            return queryset.filter(
+                status='approved',
+                is_returned=False,
+                due_date__lt=today
+            )
+
+        if overdue_handle_status:
+            if overdue_handle_status not in ['pending', 'handled']:
+                raise ValidationError({'overdue_handle_status': '逾期处理状态只能是 pending 或 handled'})
+            queryset = overdue_queryset_filter(queryset)
+            if overdue_handle_status == 'pending':
+                queryset = queryset.filter(Q(overdue_handle_status='pending') | Q(overdue_handle_status__isnull=True))
+            else:
+                queryset = queryset.filter(overdue_handle_status='handled')
+
         if is_overdue is not None:
+            if is_overdue.lower() not in ['true', 'false']:
+                raise ValidationError({'is_overdue': '是否逾期只能是 true 或 false'})
             is_overdue_bool = is_overdue.lower() == 'true'
             if is_overdue_bool:
-                queryset = queryset.filter(
-                    status='approved',
-                    is_returned=False,
-                    due_date__lt=today
-                )
+                queryset = overdue_queryset_filter(queryset)
             else:
                 queryset = queryset.exclude(
                     status='approved',
@@ -146,16 +159,25 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
 
         if min_overdue_days or max_overdue_days:
-            queryset = queryset.filter(
-                status='approved',
-                is_returned=False,
-                due_date__lt=today
-            )
+            try:
+                min_overdue_days_value = int(min_overdue_days) if min_overdue_days else None
+                max_overdue_days_value = int(max_overdue_days) if max_overdue_days else None
+            except (TypeError, ValueError):
+                raise ValidationError({'overdue_days': '逾期天数必须是数字'})
+
+            if min_overdue_days_value is not None and min_overdue_days_value < 0:
+                raise ValidationError({'min_overdue_days': '最小逾期天数不能小于 0'})
+            if max_overdue_days_value is not None and max_overdue_days_value < 0:
+                raise ValidationError({'max_overdue_days': '最大逾期天数不能小于 0'})
+            if min_overdue_days_value is not None and max_overdue_days_value is not None and min_overdue_days_value > max_overdue_days_value:
+                raise ValidationError({'overdue_days': '最小逾期天数不能大于最大逾期天数'})
+
+            queryset = overdue_queryset_filter(queryset)
             if min_overdue_days:
-                min_date = today - timedelta(days=int(min_overdue_days))
+                min_date = today - timedelta(days=min_overdue_days_value)
                 queryset = queryset.filter(due_date__lte=min_date)
             if max_overdue_days:
-                max_date = today - timedelta(days=int(max_overdue_days) + 1)
+                max_date = today - timedelta(days=max_overdue_days_value + 1)
                 queryset = queryset.filter(due_date__gt=max_date)
 
         return queryset
@@ -698,7 +720,7 @@ class StatisticsView(APIView):
             is_returned=False,
             due_date__lt=today
         )
-        current_overdue_count = overdue_queryset.filter(overdue_handle_status='pending').count()
+        current_overdue_count = overdue_queryset.filter(Q(overdue_handle_status='pending') | Q(overdue_handle_status__isnull=True)).count()
         handled_overdue_count = overdue_queryset.filter(overdue_handle_status='handled').count()
         damaged_count = PatrolRecord.objects.filter(
             damage_level__gt=0,
@@ -802,7 +824,7 @@ class StatisticsView(APIView):
 
         overdue_by_borrower = overdue_records.values('borrower').annotate(
             total_count=Count('id'),
-            pending_count=Count('id', filter=Q(overdue_handle_status='pending')),
+            pending_count=Count('id', filter=Q(overdue_handle_status='pending') | Q(overdue_handle_status__isnull=True)),
             handled_count=Count('id', filter=Q(overdue_handle_status='handled'))
         ).order_by('-total_count')[:20]
 
@@ -813,7 +835,6 @@ class StatisticsView(APIView):
                 (today - record.due_date).days
                 for record in borrower_records
             )
-            pending_records = borrower_records.filter(overdue_handle_status='pending')
             max_overdue_days = max(
                 ((today - record.due_date).days for record in borrower_records),
                 default=0
@@ -825,14 +846,21 @@ class StatisticsView(APIView):
                 'handled_count': item['handled_count'],
                 'total_overdue_days': total_overdue_days,
                 'avg_overdue_days': round(total_overdue_days / item['total_count'], 1) if item['total_count'] > 0 else 0,
-                'max_overdue_days': max_overdue_days
+                'max_overdue_days': max_overdue_days,
+                'detail_entry': {
+                    'endpoint': self.request.path,
+                    'params': {
+                        'type': 'overdue_detail',
+                        'borrower': item['borrower']
+                    }
+                }
             })
 
         ranking.sort(key=lambda x: x['total_overdue_days'], reverse=True)
 
         return Response({
             'total_overdue': overdue_records.count(),
-            'pending_overdue': overdue_records.filter(overdue_handle_status='pending').count(),
+            'pending_overdue': overdue_records.filter(Q(overdue_handle_status='pending') | Q(overdue_handle_status__isnull=True)).count(),
             'handled_overdue': overdue_records.filter(overdue_handle_status='handled').count(),
             'ranking': ranking
         })

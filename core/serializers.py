@@ -67,8 +67,21 @@ class PatrolRecordSerializer(serializers.ModelSerializer):
     reviewer_name = serializers.CharField(source='reviewer.username', read_only=True, allow_null=True)
     is_overdue = serializers.BooleanField(read_only=True)
     overdue_days = serializers.IntegerField(read_only=True)
-    overdue_handle_status_display = serializers.CharField(source='get_overdue_handle_status_display', read_only=True)
+    overdue_handle_status = serializers.SerializerMethodField()
+    overdue_handle_status_display = serializers.SerializerMethodField()
     overdue_handled_by_name = serializers.CharField(source='overdue_handled_by.username', read_only=True, allow_null=True)
+
+    def get_overdue_handle_status(self, obj):
+        if not obj.is_overdue:
+            return None
+        return obj.overdue_handle_status or 'pending'
+
+    def get_overdue_handle_status_display(self, obj):
+        if not obj.is_overdue:
+            return None
+        if obj.overdue_handle_status == 'handled':
+            return '已处理'
+        return '待处理'
 
     class Meta:
         model = PatrolRecord
@@ -224,5 +237,7 @@ class OverdueHandleSerializer(serializers.Serializer):
                 raise serializers.ValidationError(f'记录 {record.id} 已归还，不属于逾期记录')
             if record.due_date >= today:
                 raise serializers.ValidationError(f'记录 {record.id} 未到逾期时间')
+            if record.overdue_handle_status == 'handled':
+                raise serializers.ValidationError(f'记录 {record.id} 已处理，不能重复处理')
         
         return value

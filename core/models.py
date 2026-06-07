@@ -138,7 +138,7 @@ class PatrolRecord(models.Model):
     reviewer = models.ForeignKey(User, on_delete=models.PROTECT, related_name='reviewed_records', null=True, blank=True, verbose_name='复核人')
     review_time = models.DateTimeField(null=True, blank=True, verbose_name='复核时间')
     review_remark = models.TextField(blank=True, null=True, verbose_name='复核备注')
-    overdue_handle_status = models.CharField(max_length=20, choices=OVERDUE_HANDLE_STATUS_CHOICES, default='pending', verbose_name='逾期处理状态')
+    overdue_handle_status = models.CharField(max_length=20, choices=OVERDUE_HANDLE_STATUS_CHOICES, null=True, blank=True, verbose_name='逾期处理状态')
     overdue_handled_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='handled_overdue_records', null=True, blank=True, verbose_name='逾期处理人')
     overdue_handled_at = models.DateTimeField(null=True, blank=True, verbose_name='逾期处理时间')
     overdue_handle_remark = models.TextField(blank=True, null=True, verbose_name='逾期处理备注')
