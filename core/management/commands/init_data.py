@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, Group
 from core.models import EquipmentType, StorageLocation, BorrowRule, Equipment
 from datetime import date
 
@@ -10,17 +10,23 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write('开始初始化数据...')
 
+        uploader_group, _ = Group.objects.get_or_create(name='uploader')
+        reviewer_group, _ = Group.objects.get_or_create(name='reviewer')
+        self.stdout.write(self.style.SUCCESS('创建用户组: uploader, reviewer'))
+
         if not User.objects.filter(username='admin').exists():
             User.objects.create_superuser('admin', 'a****@***********', 'admin123')
             self.stdout.write(self.style.SUCCESS('创建管理员用户: admin / admin123'))
 
         if not User.objects.filter(username='employee_a').exists():
-            User.objects.create_user('employee_a', 'e***********@***********', 'emp123456')
-            self.stdout.write(self.style.SUCCESS('创建员工A用户: employee_a / emp123456'))
+            user_a = User.objects.create_user('employee_a', 'e***********@***********', 'emp123456')
+            user_a.groups.add(uploader_group)
+            self.stdout.write(self.style.SUCCESS('创建员工A用户(上传员): employee_a / emp123456'))
 
         if not User.objects.filter(username='employee_b').exists():
-            User.objects.create_user('employee_b', 'e***********@***********', 'emp123456')
-            self.stdout.write(self.style.SUCCESS('创建员工B用户: employee_b / emp123456'))
+            user_b = User.objects.create_user('employee_b', 'e***********@***********', 'emp123456')
+            user_b.groups.add(reviewer_group)
+            self.stdout.write(self.style.SUCCESS('创建员工B用户(复核员): employee_b / emp123456'))
 
         equipment_types = [
             {'name': '笔记本电脑', 'code': 'LAPTOP'},

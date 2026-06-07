@@ -1,14 +1,14 @@
 import csv
 import io
+import os
 from datetime import datetime, timedelta
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import viewsets, status, filters
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth.models import User
 from .models import (
     EquipmentType, StorageLocation, BorrowRule, Equipment,
@@ -18,9 +18,9 @@ from .models import (
 from .serializers import (
     EquipmentTypeSerializer, StorageLocationSerializer, BorrowRuleSerializer,
     EquipmentSerializer, PatrolBatchSerializer, PatrolRecordSerializer,
-    ProblemRecordSerializer, UploadResponseSerializer, ReviewSerializer
+    ProblemRecordSerializer, ReviewSerializer
 )
-from .permissions import IsAdminUser, IsAdminOrReadOnly
+from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer
 
 
 class EquipmentTypeViewSet(viewsets.ModelViewSet):
@@ -157,22 +157,50 @@ class ProblemRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class UploadBatchView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsUploader]
+
+    ALLOWED_EXTENSIONS = ['.csv']
+    ALLOWED_CONTENT_TYPES = ['text/csv', 'application/csv', 'text/plain', 'application/vnd.ms-excel']
+    REQUIRED_COLUMNS = ['器材编号', '器材名称', '库位编码', '借用人', '借用日期', '应还日期', '归还日期', '是否归还', '损坏等级', '损坏描述']
 
     def post(self, request):
         if 'file' not in request.FILES:
             return Response({'error': '请上传CSV文件'}, status=status.HTTP_400_BAD_REQUEST)
 
         file = request.FILES['file']
+        file_name = file.name
+        file_ext = os.path.splitext(file_name)[1].lower()
+
+        if file_ext not in self.ALLOWED_EXTENSIONS:
+            return Response({'error': f'不支持的文件类型，仅支持: {", ".join(self.ALLOWED_EXTENSIONS)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        content_type = file.content_type
+        if content_type not in self.ALLOWED_CONTENT_TYPES and not file_name.endswith('.csv'):
+            return Response({'error': '文件格式错误，请上传CSV格式文件'}, status=status.HTTP_400_BAD_REQUEST)
+
         remark = request.data.get('remark', '')
 
         try:
             file_content = file.read().decode('utf-8')
         except UnicodeDecodeError:
             file.seek(0)
-            file_content = file.read().decode('gbk')
+            try:
+                file_content = file.read().decode('gbk')
+            except UnicodeDecodeError:
+                return Response({'error': '文件编码不支持，请使用UTF-8或GBK编码'}, status=status.HTTP_400_BAD_REQUEST)
 
-        csv_reader = csv.DictReader(io.StringIO(file_content))
+        try:
+            csv_reader = csv.DictReader(io.StringIO(file_content))
+        except Exception as e:
+            return Response({'error': f'CSV文件解析失败: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if csv_reader.fieldnames is None:
+            return Response({'error': 'CSV文件格式错误，缺少表头'}, status=status.HTTP_400_BAD_REQUEST)
+
+        missing_columns = [col for col in self.REQUIRED_COLUMNS if col not in csv_reader.fieldnames]
+        if missing_columns:
+            return Response({'error': f'CSV缺少必要列: {", ".join(missing_columns)}'}, status=status.HTTP_400_BAD_REQUEST)
+
         rows = list(csv_reader)
 
         if not rows:
@@ -315,7 +343,7 @@ class UploadBatchView(APIView):
 
 
 class ReviewView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsReviewer]
 
     def post(self, request):
         serializer = ReviewSerializer(data=request.data)
@@ -326,15 +354,17 @@ class ReviewView(APIView):
         review_status = serializer.validated_data['status']
         remark = serializer.validated_data.get('remark', '')
 
-        records = PatrolRecord.objects.filter(
+        records_query = PatrolRecord.objects.filter(
             id__in=record_ids,
             status='pending'
         )
 
-        if not records.exists():
+        records_list = list(records_query.select_related('equipment'))
+
+        if not records_list:
             return Response({'error': '没有找到待复核的记录'}, status=status.HTTP_400_BAD_REQUEST)
 
-        updated_count = records.update(
+        updated_count = records_query.update(
             status=review_status,
             reviewer=request.user,
             review_time=timezone.now(),
@@ -342,14 +372,15 @@ class ReviewView(APIView):
         )
 
         if review_status == 'approved':
-            for record in records:
+            for record in records_list:
                 if record.equipment:
-                    record.equipment.damage_level = record.damage_level
+                    equipment = record.equipment
+                    equipment.damage_level = record.damage_level
                     if record.is_returned:
-                        record.equipment.is_available = True
+                        equipment.is_available = True
                     else:
-                        record.equipment.is_available = False
-                    record.equipment.save()
+                        equipment.is_available = False
+                    equipment.save()
 
         return Response({
             'message': f'成功复核 {updated_count} 条记录',
