@@ -11,6 +11,7 @@ router.register(r'equipments', views.EquipmentViewSet)
 router.register(r'patrol-batches', views.PatrolBatchViewSet)
 router.register(r'patrol-records', views.PatrolRecordViewSet)
 router.register(r'problem-records', views.ProblemRecordViewSet)
+router.register(r'repair-orders', views.EquipmentRepairOrderViewSet)
 
 urlpatterns = [
     path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

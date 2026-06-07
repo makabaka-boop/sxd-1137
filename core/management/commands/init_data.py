@@ -1,7 +1,11 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User, Group
-from core.models import EquipmentType, StorageLocation, BorrowRule, Equipment
-from datetime import date
+from django.utils import timezone
+from core.models import (
+    EquipmentType, StorageLocation, BorrowRule, Equipment,
+    PatrolBatch, PatrolRecord, EquipmentRepairOrder
+)
+from datetime import date, timedelta
 
 
 class Command(BaseCommand):
@@ -79,5 +83,101 @@ class Command(BaseCommand):
         for equip in equipments:
             Equipment.objects.get_or_create(serial_number=equip['serial_number'], defaults=equip)
         self.stdout.write(self.style.SUCCESS('初始化器材数据'))
+
+        if not PatrolBatch.objects.filter(batch_no='PTEST001').exists():
+            admin_user = User.objects.get(username='admin')
+            test_batch = PatrolBatch.objects.create(
+                batch_no='PTEST001',
+                uploader=admin_user,
+                file_name='test_data.csv',
+                total_count=3,
+                success_count=3,
+                problem_count=0,
+                remark='测试批次'
+            )
+
+            lap001 = Equipment.objects.get(serial_number='LAP001')
+            lap002 = Equipment.objects.get(serial_number='LAP002')
+            pro001 = Equipment.objects.get(serial_number='PRO001')
+
+            today = date.today()
+            borrow_date = today - timedelta(days=30)
+            due_date = today - timedelta(days=10)
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=1,
+                equipment=lap001,
+                equipment_serial='LAP001',
+                equipment_name='ThinkPad X1 Carbon',
+                equipment_type=lap001.equipment_type,
+                storage_location=lap001.storage_location,
+                location_code=lap001.storage_location.code,
+                borrower='张三',
+                borrow_date=borrow_date,
+                due_date=due_date,
+                return_date=today - timedelta(days=5),
+                is_returned=True,
+                damage_level=1,
+                damage_description='键盘按键轻微磨损',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=2,
+                equipment=lap002,
+                equipment_serial='LAP002',
+                equipment_name='MacBook Pro 14',
+                equipment_type=lap002.equipment_type,
+                storage_location=lap002.storage_location,
+                location_code=lap002.storage_location.code,
+                borrower='李四',
+                borrow_date=borrow_date,
+                due_date=due_date,
+                return_date=today - timedelta(days=3),
+                is_returned=True,
+                damage_level=2,
+                damage_description='屏幕有划痕，外壳有凹陷',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=3,
+                equipment=pro001,
+                equipment_serial='PRO001',
+                equipment_name='Epson CB-X06',
+                equipment_type=pro001.equipment_type,
+                storage_location=pro001.storage_location,
+                location_code=pro001.storage_location.code,
+                borrower='王五',
+                borrow_date=borrow_date,
+                due_date=due_date,
+                return_date=today - timedelta(days=1),
+                is_returned=True,
+                damage_level=3,
+                damage_description='投影镜头模糊，无法正常聚焦',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            self.stdout.write(self.style.SUCCESS('初始化测试巡管记录数据'))
+
+            lap001.damage_level = 1
+            lap001.save()
+            lap002.damage_level = 2
+            lap002.save()
+            pro001.damage_level = 3
+            pro001.save()
+            self.stdout.write(self.style.SUCCESS('同步器材损坏等级'))
 
         self.stdout.write(self.style.SUCCESS('数据初始化完成！'))

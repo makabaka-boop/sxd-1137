@@ -144,6 +144,21 @@ class PatrolRecord(models.Model):
         return f'{self.batch.batch_no} - 行{self.line_number}'
 
 
+REPAIR_STATUS_CHOICES = [
+    ('pending', '待维修'),
+    ('repairing', '维修中'),
+    ('completed', '已完成'),
+    ('cancelled', '已取消'),
+]
+
+REPAIR_REASON_CHOICES = [
+    ('normal_wear', '正常损耗'),
+    ('accident', '意外损坏'),
+    ('malfunction', '设备故障'),
+    ('maintenance', '定期维护'),
+    ('other', '其他'),
+]
+
 PROBLEM_TYPE_CHOICES = [
     ('missing_serial', '器材编号缺失'),
     ('invalid_location', '库位不存在'),
@@ -175,3 +190,31 @@ class ProblemRecord(models.Model):
 
     def __str__(self):
         return f'{self.batch.batch_no} - 行{self.line_number} - {self.get_problem_type_display()}'
+
+
+class EquipmentRepairOrder(models.Model):
+    order_no = models.CharField(max_length=50, unique=True, verbose_name='工单号')
+    patrol_record = models.ForeignKey(PatrolRecord, on_delete=models.PROTECT, related_name='repair_orders', verbose_name='巡管记录')
+    equipment = models.ForeignKey(Equipment, on_delete=models.PROTECT, related_name='repair_orders', verbose_name='器材')
+    repair_reason = models.CharField(max_length=30, choices=REPAIR_REASON_CHOICES, verbose_name='维修原因')
+    damage_description = models.TextField(verbose_name='损坏描述')
+    send_time = models.DateTimeField(verbose_name='送修时间')
+    expected_complete_time = models.DateTimeField(null=True, blank=True, verbose_name='预计完成时间')
+    actual_complete_time = models.DateTimeField(null=True, blank=True, verbose_name='实际完成时间')
+    repair_person = models.ForeignKey(User, on_delete=models.PROTECT, related_name='assigned_repairs', verbose_name='维修负责人')
+    status = models.CharField(max_length=20, choices=REPAIR_STATUS_CHOICES, default='pending', verbose_name='处理状态')
+    result_note = models.TextField(blank=True, null=True, verbose_name='结果说明')
+    updated_damage_level = models.IntegerField(choices=DAMAGE_LEVEL_CHOICES, null=True, blank=True, verbose_name='维修后损坏等级')
+    restore_available = models.BooleanField(default=True, verbose_name='恢复可用状态')
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='created_repair_orders', verbose_name='创建人')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'equipment_repair_order'
+        verbose_name = '器材维修工单'
+        verbose_name_plural = '器材维修工单'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.order_no} - {self.equipment.serial_number}'

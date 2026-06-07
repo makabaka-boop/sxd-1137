@@ -12,13 +12,14 @@ from rest_framework.views import APIView
 from django.contrib.auth.models import User
 from .models import (
     EquipmentType, StorageLocation, BorrowRule, Equipment,
-    PatrolBatch, PatrolRecord, ProblemRecord,
-    DAMAGE_LEVEL_CHOICES
+    PatrolBatch, PatrolRecord, ProblemRecord, EquipmentRepairOrder,
+    DAMAGE_LEVEL_CHOICES, REPAIR_STATUS_CHOICES
 )
 from .serializers import (
     EquipmentTypeSerializer, StorageLocationSerializer, BorrowRuleSerializer,
     EquipmentSerializer, PatrolBatchSerializer, PatrolRecordSerializer,
-    ProblemRecordSerializer, ReviewSerializer
+    ProblemRecordSerializer, ReviewSerializer,
+    EquipmentRepairOrderSerializer, RepairStatusUpdateSerializer, RepairOrderCreateSerializer
 )
 from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer
 
@@ -154,6 +155,112 @@ class ProblemRecordViewSet(viewsets.ReadOnlyModelViewSet):
         problem.resolution_note = resolution_note
         problem.save()
         return Response(ProblemRecordSerializer(problem).data)
+
+
+class EquipmentRepairOrderViewSet(viewsets.ModelViewSet):
+    queryset = EquipmentRepairOrder.objects.all()
+    serializer_class = EquipmentRepairOrderSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['order_no', 'equipment__serial_number', 'equipment__name']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        equipment_serial = self.request.query_params.get('equipment_serial')
+        equipment_type = self.request.query_params.get('equipment_type')
+        storage_location = self.request.query_params.get('storage_location')
+        repair_person = self.request.query_params.get('repair_person')
+        status = self.request.query_params.get('status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
+        if equipment_serial:
+            queryset = queryset.filter(equipment__serial_number__icontains=equipment_serial)
+        if equipment_type:
+            queryset = queryset.filter(equipment__equipment_type_id=equipment_type)
+        if storage_location:
+            queryset = queryset.filter(equipment__storage_location_id=storage_location)
+        if repair_person:
+            queryset = queryset.filter(repair_person_id=repair_person)
+        if status:
+            queryset = queryset.filter(status=status)
+        if start_date:
+            queryset = queryset.filter(send_time__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(send_time__date__lte=end_date)
+
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return RepairOrderCreateSerializer
+        return EquipmentRepairOrderSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        validated_data = serializer.validated_data
+        patrol_record = PatrolRecord.objects.get(id=validated_data['patrol_record_id'])
+        repair_person = User.objects.get(id=validated_data['repair_person'])
+        
+        order_no = f'R{timezone.now().strftime("%Y%m%d%H%M%S")}'
+        
+        repair_order = EquipmentRepairOrder.objects.create(
+            order_no=order_no,
+            patrol_record=patrol_record,
+            equipment=patrol_record.equipment,
+            repair_reason=validated_data['repair_reason'],
+            damage_description=validated_data['damage_description'],
+            send_time=validated_data['send_time'],
+            expected_complete_time=validated_data.get('expected_complete_time'),
+            repair_person=repair_person,
+            created_by=request.user
+        )
+        
+        equipment = patrol_record.equipment
+        equipment.is_available = False
+        equipment.save()
+        
+        return Response(
+            EquipmentRepairOrderSerializer(repair_order, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED
+        )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def update_status(self, request, pk=None):
+        repair_order = self.get_object()
+        serializer = RepairStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        new_status = serializer.validated_data['status']
+        result_note = serializer.validated_data.get('result_note', '')
+        updated_damage_level = serializer.validated_data.get('updated_damage_level')
+        restore_available = serializer.validated_data.get('restore_available', True)
+        
+        repair_order.status = new_status
+        repair_order.result_note = result_note
+        
+        if new_status == 'completed':
+            repair_order.actual_complete_time = timezone.now()
+            if updated_damage_level is not None:
+                repair_order.updated_damage_level = updated_damage_level
+            
+            equipment = repair_order.equipment
+            if updated_damage_level is not None:
+                equipment.damage_level = updated_damage_level
+            if restore_available:
+                equipment.is_available = True
+            equipment.save()
+        elif new_status == 'cancelled':
+            equipment = repair_order.equipment
+            equipment.is_available = True
+            equipment.save()
+        
+        repair_order.save()
+        
+        return Response(EquipmentRepairOrderSerializer(repair_order, context=self.get_serializer_context()).data)
 
 
 class UploadBatchView(APIView):
@@ -401,6 +508,10 @@ class StatisticsView(APIView):
             return self.get_damage_ranking()
         elif stats_type == 'delay_ranking':
             return self.get_delay_ranking()
+        elif stats_type == 'repair_stats':
+            return self.get_repair_stats()
+        elif stats_type == 'frequent_damage_ranking':
+            return self.get_frequent_damage_ranking()
         else:
             return self.get_overview()
 
@@ -494,11 +605,86 @@ class StatisticsView(APIView):
             status='approved'
         ).count()
 
+        repairing_count = EquipmentRepairOrder.objects.filter(
+            status__in=['pending', 'repairing']
+        ).count()
+        completed_repair_count = EquipmentRepairOrder.objects.filter(
+            status='completed'
+        ).count()
+
         return Response({
             'total_batches': total_batches,
             'total_records': total_records,
             'pending_count': pending_count,
             'approved_count': approved_count,
             'delayed_count': delayed_count,
-            'damaged_count': damaged_count
+            'damaged_count': damaged_count,
+            'repairing_count': repairing_count,
+            'completed_repair_count': completed_repair_count
+        })
+
+    def get_repair_stats(self):
+        total_repair_orders = EquipmentRepairOrder.objects.count()
+        repairing_count = EquipmentRepairOrder.objects.filter(
+            status__in=['pending', 'repairing']
+        ).count()
+        completed_count = EquipmentRepairOrder.objects.filter(
+            status='completed'
+        ).count()
+        cancelled_count = EquipmentRepairOrder.objects.filter(
+            status='cancelled'
+        ).count()
+
+        repair_by_type = EquipmentRepairOrder.objects.values(
+            'equipment__equipment_type__name',
+            'equipment__equipment_type__code'
+        ).annotate(
+            count=Count('id')
+        ).order_by('-count')
+
+        repair_stats = []
+        for item in repair_by_type:
+            completed_by_type = EquipmentRepairOrder.objects.filter(
+                equipment__equipment_type__code=item['equipment__equipment_type__code'],
+                status='completed'
+            ).count()
+            repair_stats.append({
+                'equipment_type_name': item['equipment__equipment_type__name'],
+                'equipment_type_code': item['equipment__equipment_type__code'],
+                'repair_count': item['count'],
+                'completed_count': completed_by_type
+            })
+
+        return Response({
+            'total_repair_orders': total_repair_orders,
+            'repairing_count': repairing_count,
+            'completed_count': completed_count,
+            'cancelled_count': cancelled_count,
+            'by_equipment_type': repair_stats
+        })
+
+    def get_frequent_damage_ranking(self):
+        ranking = EquipmentRepairOrder.objects.values(
+            'equipment__serial_number',
+            'equipment__name',
+            'equipment__equipment_type__name'
+        ).annotate(
+            repair_count=Count('id')
+        ).order_by('-repair_count')[:20]
+
+        result = []
+        for item in ranking:
+            equipment = Equipment.objects.get(serial_number=item['equipment__serial_number'])
+            result.append({
+                'serial_number': item['equipment__serial_number'],
+                'name': item['equipment__name'],
+                'equipment_type_name': item['equipment__equipment_type__name'],
+                'repair_count': item['repair_count'],
+                'current_damage_level': equipment.damage_level,
+                'current_damage_level_display': equipment.get_damage_level_display(),
+                'is_available': equipment.is_available
+            })
+
+        return Response({
+            'ranking': result
         })
