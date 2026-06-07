@@ -46,15 +46,17 @@ class PatrolBatchAdmin(admin.ModelAdmin):
 class PatrolRecordAdmin(admin.ModelAdmin):
     list_display = [
         'batch', 'line_number', 'equipment_serial', 'equipment_name', 
-        'borrower', 'damage_level', 'status', 'is_overdue_display', 
-        'overdue_days_display', 'overdue_handle_status'
+        'borrower', 'damage_level', 'status', 'is_returned',
+        'return_date', 'return_storage_location', 'return_damage_level',
+        'is_overdue_display', 'overdue_days_display', 'overdue_handle_status'
     ]
     search_fields = ['equipment_serial', 'equipment_name', 'borrower', 'batch__batch_no']
     list_filter = [
         'status', 'damage_level', 'equipment_type', 'storage_location',
-        'overdue_handle_status'
+        'overdue_handle_status', 'is_returned', 'return_storage_location',
+        'return_damage_level', 'return_date'
     ]
-    readonly_fields = ['batch', 'line_number', 'created_at']
+    readonly_fields = ['batch', 'line_number', 'created_at', 'returned_by', 'returned_at']
     fieldsets = (
         (None, {
             'fields': ('batch', 'line_number', 'equipment', 'equipment_serial', 'equipment_name')
@@ -62,6 +64,10 @@ class PatrolRecordAdmin(admin.ModelAdmin):
         ('借用信息', {
             'fields': ('equipment_type', 'storage_location', 'location_code', 'borrower', 
                        'borrow_date', 'due_date', 'return_date', 'is_returned')
+        }),
+        ('归还信息', {
+            'fields': ('return_storage_location', 'return_damage_level', 'return_remark',
+                       'returned_by', 'returned_at')
         }),
         ('损坏信息', {
             'fields': ('damage_level', 'damage_description')

@@ -70,6 +70,11 @@ class PatrolRecordSerializer(serializers.ModelSerializer):
     overdue_handle_status = serializers.SerializerMethodField()
     overdue_handle_status_display = serializers.SerializerMethodField()
     overdue_handled_by_name = serializers.CharField(source='overdue_handled_by.username', read_only=True, allow_null=True)
+    return_storage_location_name = serializers.CharField(source='return_storage_location.name', read_only=True, allow_null=True)
+    return_storage_location_code = serializers.CharField(source='return_storage_location.code', read_only=True, allow_null=True)
+    return_damage_level_display = serializers.CharField(source='get_return_damage_level_display', read_only=True, allow_null=True)
+    returned_by_name = serializers.CharField(source='returned_by.username', read_only=True, allow_null=True)
+    has_pending_repair_order = serializers.SerializerMethodField()
 
     def get_overdue_handle_status(self, obj):
         if not obj.is_overdue:
@@ -83,10 +88,43 @@ class PatrolRecordSerializer(serializers.ModelSerializer):
             return '已处理'
         return '待处理'
 
+    def get_has_pending_repair_order(self, obj):
+        return obj.repair_orders.filter(status__in=['pending', 'repairing']).exists()
+
     class Meta:
         model = PatrolRecord
         fields = '__all__'
-        read_only_fields = ['id', 'batch', 'line_number', 'created_at']
+        read_only_fields = ['id', 'batch', 'line_number', 'created_at', 'returned_at', 'returned_by']
+
+
+class ReturnRegisterSerializer(serializers.Serializer):
+    return_date = serializers.DateField()
+    return_storage_location_id = serializers.IntegerField()
+    return_damage_level = serializers.ChoiceField(choices=DAMAGE_LEVEL_CHOICES)
+    return_remark = serializers.CharField(required=False, allow_blank=True)
+    damage_description = serializers.CharField(required=False, allow_blank=True)
+    auto_create_repair_order = serializers.BooleanField(required=False, default=False)
+    repair_reason = serializers.ChoiceField(choices=[item[0] for item in REPAIR_REASON_CHOICES], required=False, allow_null=True)
+    repair_person_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate_return_storage_location_id(self, value):
+        try:
+            StorageLocation.objects.get(id=value, is_active=True)
+        except StorageLocation.DoesNotExist:
+            raise serializers.ValidationError('归还库位不存在或未启用')
+        return value
+
+    def validate(self, data):
+        if data.get('auto_create_repair_order') and int(data['return_damage_level']) > 0:
+            if not data.get('repair_reason'):
+                raise serializers.ValidationError('自动创建维修工单时，维修原因为必填')
+            if not data.get('repair_person_id'):
+                raise serializers.ValidationError('自动创建维修工单时，维修负责人为必填')
+            try:
+                User.objects.get(id=data['repair_person_id'])
+            except User.DoesNotExist:
+                raise serializers.ValidationError('维修负责人不存在')
+        return data
 
 
 class ProblemRecordSerializer(serializers.ModelSerializer):

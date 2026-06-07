@@ -21,7 +21,7 @@ from .serializers import (
     EquipmentSerializer, PatrolBatchSerializer, PatrolRecordSerializer,
     ProblemRecordSerializer, ReviewSerializer,
     EquipmentRepairOrderSerializer, RepairStatusUpdateSerializer, RepairOrderCreateSerializer,
-    OverdueHandleSerializer
+    OverdueHandleSerializer, ReturnRegisterSerializer
 )
 from .permissions import IsAdminUser, IsAdminOrReadOnly, IsUploader, IsReviewer, IsRepairOrderCreator
 
@@ -110,6 +110,11 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
         min_overdue_days = self.request.query_params.get('min_overdue_days')
         max_overdue_days = self.request.query_params.get('max_overdue_days')
         overdue_handle_status = self.request.query_params.get('overdue_handle_status')
+        is_returned = self.request.query_params.get('is_returned')
+        return_storage_location = self.request.query_params.get('return_storage_location')
+        return_damage_level = self.request.query_params.get('return_damage_level')
+        return_start_date = self.request.query_params.get('return_start_date')
+        return_end_date = self.request.query_params.get('return_end_date')
 
         if equipment_type:
             queryset = queryset.filter(equipment_type_id=equipment_type)
@@ -127,6 +132,17 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(damage_level=damage_level)
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
+        if is_returned is not None:
+            queryset = queryset.filter(is_returned=(is_returned.lower() == 'true'))
+        if return_storage_location:
+            queryset = queryset.filter(return_storage_location_id=return_storage_location)
+        if return_damage_level:
+            queryset = queryset.filter(return_damage_level=return_damage_level)
+        if return_start_date:
+            queryset = queryset.filter(return_date__gte=return_start_date)
+        if return_end_date:
+            queryset = queryset.filter(return_date__lte=return_end_date)
+
         today = timezone.now().date()
 
         def overdue_queryset_filter(queryset):
@@ -200,6 +216,175 @@ class PatrolRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             'message': f'成功处理 {updated_count} 条逾期记录',
             'updated_count': updated_count
+        })
+
+    @action(detail=True, methods=['post'], permission_classes=[IsReviewer], url_path='return-register')
+    def return_register(self, request, pk=None):
+        patrol_record = self.get_object()
+
+        if patrol_record.status != 'approved':
+            return Response(
+                {'error': '只能对已通过复核的记录进行归还登记'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if patrol_record.is_returned:
+            return Response(
+                {'error': '该记录已归还，不能重复登记'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not patrol_record.equipment:
+            return Response(
+                {'error': '该记录未关联器材，无法进行归还登记'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = ReturnRegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        validated_data = serializer.validated_data
+        return_date = validated_data['return_date']
+        return_storage_location = StorageLocation.objects.get(id=validated_data['return_storage_location_id'])
+        return_damage_level = int(validated_data['return_damage_level'])
+        return_remark = validated_data.get('return_remark', '')
+        damage_description = validated_data.get('damage_description', '')
+
+        patrol_record.return_date = return_date
+        patrol_record.is_returned = True
+        patrol_record.return_storage_location = return_storage_location
+        patrol_record.return_damage_level = return_damage_level
+        patrol_record.return_remark = return_remark
+        patrol_record.damage_level = return_damage_level
+        if damage_description:
+            patrol_record.damage_description = damage_description
+        patrol_record.returned_by = request.user
+        patrol_record.returned_at = timezone.now()
+        patrol_record.save()
+
+        equipment = patrol_record.equipment
+        equipment.storage_location = return_storage_location
+        equipment.damage_level = return_damage_level
+        if return_damage_level == 0:
+            equipment.is_available = True
+        else:
+            equipment.is_available = False
+        equipment.save()
+
+        repair_order = None
+        if return_damage_level > 0 and validated_data.get('auto_create_repair_order'):
+            repair_person = User.objects.get(id=validated_data['repair_person_id'])
+            order_no = f'R{timezone.now().strftime("%Y%m%d%H%M%S")}'
+            repair_order = EquipmentRepairOrder.objects.create(
+                order_no=order_no,
+                patrol_record=patrol_record,
+                equipment=equipment,
+                repair_reason=validated_data['repair_reason'],
+                damage_description=damage_description or patrol_record.damage_description or '归还时检测到损坏',
+                send_time=timezone.now(),
+                repair_person=repair_person,
+                created_by=request.user
+            )
+            equipment.is_available = False
+            equipment.save()
+
+        response_data = {
+            'message': '归还登记成功',
+            'patrol_record': PatrolRecordSerializer(patrol_record, context=self.get_serializer_context()).data,
+            'equipment': EquipmentSerializer(equipment).data,
+        }
+
+        if repair_order:
+            response_data['repair_order'] = EquipmentRepairOrderSerializer(
+                repair_order, context=self.get_serializer_context()
+            ).data
+            response_data['repair_order_created'] = True
+        else:
+            response_data['repair_order_created'] = False
+            if return_damage_level > 0:
+                response_data['repair_order_suggested'] = True
+                response_data['repair_order_suggestion'] = '归还检测到损坏，建议创建维修工单'
+
+        return Response(response_data)
+
+    @action(detail=False, methods=['post'], permission_classes=[IsReviewer], url_path='batch-return-register')
+    def batch_return_register(self, request):
+        record_ids = request.data.get('record_ids', [])
+        if not record_ids:
+            return Response(
+                {'error': '请选择要归还的记录'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return_date = request.data.get('return_date')
+        return_storage_location_id = request.data.get('return_storage_location_id')
+        return_damage_level = request.data.get('return_damage_level', 0)
+        return_remark = request.data.get('return_remark', '')
+
+        if not return_date or not return_storage_location_id:
+            return Response(
+                {'error': '归还日期和归还库位为必填项'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            return_storage_location = StorageLocation.objects.get(id=return_storage_location_id, is_active=True)
+        except StorageLocation.DoesNotExist:
+            return Response(
+                {'error': '归还库位不存在或未启用'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        records = PatrolRecord.objects.filter(
+            id__in=record_ids,
+            status='approved',
+            is_returned=False
+        ).select_related('equipment')
+
+        if not records.exists():
+            return Response(
+                {'error': '没有符合条件的可归还记录'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        success_count = 0
+        failed_count = 0
+        failed_records = []
+        now = timezone.now()
+
+        for record in records:
+            if not record.equipment:
+                failed_count += 1
+                failed_records.append({
+                    'id': record.id,
+                    'equipment_serial': record.equipment_serial,
+                    'reason': '未关联器材'
+                })
+                continue
+
+            record.return_date = return_date
+            record.is_returned = True
+            record.return_storage_location = return_storage_location
+            record.return_damage_level = int(return_damage_level)
+            record.return_remark = return_remark
+            record.damage_level = int(return_damage_level)
+            record.returned_by = request.user
+            record.returned_at = now
+            record.save()
+
+            equipment = record.equipment
+            equipment.storage_location = return_storage_location
+            equipment.damage_level = int(return_damage_level)
+            equipment.is_available = (int(return_damage_level) == 0)
+            equipment.save()
+
+            success_count += 1
+
+        return Response({
+            'message': f'批量归还完成，成功 {success_count} 条，失败 {failed_count} 条',
+            'success_count': success_count,
+            'failed_count': failed_count,
+            'failed_records': failed_records
         })
 
 

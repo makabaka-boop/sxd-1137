@@ -173,11 +173,98 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS('初始化测试巡管记录数据'))
 
             lap001.damage_level = 1
+            lap001.is_available = True
             lap001.save()
             lap002.damage_level = 2
+            lap002.is_available = True
             lap002.save()
             pro001.damage_level = 3
+            pro001.is_available = True
             pro001.save()
             self.stdout.write(self.style.SUCCESS('同步器材损坏等级'))
+
+            lap003 = Equipment.objects.get(serial_number='LAP003')
+            cam001 = Equipment.objects.get(serial_number='CAM001')
+            cam002 = Equipment.objects.get(serial_number='CAM002')
+            a01 = StorageLocation.objects.get(code='A01')
+            a02 = StorageLocation.objects.get(code='A02')
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=4,
+                equipment=lap003,
+                equipment_serial='LAP003',
+                equipment_name='Dell XPS 15',
+                equipment_type=lap003.equipment_type,
+                storage_location=a01,
+                location_code=a01.code,
+                borrower='赵六',
+                borrow_date=today - timedelta(days=7),
+                due_date=today + timedelta(days=7),
+                return_date=None,
+                is_returned=False,
+                damage_level=0,
+                damage_description='',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=5,
+                equipment=cam001,
+                equipment_serial='CAM001',
+                equipment_name='Sony FX3',
+                equipment_type=cam001.equipment_type,
+                storage_location=a02,
+                location_code=a02.code,
+                borrower='钱七',
+                borrow_date=today - timedelta(days=14),
+                due_date=today - timedelta(days=3),
+                return_date=None,
+                is_returned=False,
+                damage_level=0,
+                damage_description='',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            PatrolRecord.objects.create(
+                batch=test_batch,
+                line_number=6,
+                equipment=cam002,
+                equipment_serial='CAM002',
+                equipment_name='Canon R5',
+                equipment_type=cam002.equipment_type,
+                storage_location=a02,
+                location_code=a02.code,
+                borrower='孙八',
+                borrow_date=today - timedelta(days=5),
+                due_date=today + timedelta(days=10),
+                return_date=None,
+                is_returned=False,
+                damage_level=0,
+                damage_description='',
+                status='approved',
+                reviewer=admin_user,
+                review_time=timezone.now(),
+                review_remark='复核通过'
+            )
+
+            test_batch.total_count = 6
+            test_batch.success_count = 6
+            test_batch.save()
+
+            lap003.is_available = False
+            lap003.save()
+            cam001.is_available = False
+            cam001.save()
+            cam002.is_available = False
+            cam002.save()
+            self.stdout.write(self.style.SUCCESS('初始化未归还测试记录数据'))
 
         self.stdout.write(self.style.SUCCESS('数据初始化完成！'))
